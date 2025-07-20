@@ -343,6 +343,56 @@ cleanup() {
     fi
 }
 
+# Function to clean OS metadata from working directory
+clean_metadata() {
+    log_step "Cleaning OS metadata files from working directory..."
+    
+    local cleaned_count=0
+    
+    # Remove .DS_Store files
+    if find "$WORKING_DIR" -name ".DS_Store" -delete 2>/dev/null; then
+        local ds_count=$(find "$WORKING_DIR" -name ".DS_Store" 2>/dev/null | wc -l | tr -d ' ')
+        if [ $ds_count -eq 0 ]; then
+            log_info "Removed .DS_Store files"
+            ((cleaned_count++))
+        fi
+    fi
+    
+    # Remove ._* resource fork files
+    local rf_files=$(find "$WORKING_DIR" -name "._*" 2>/dev/null | wc -l | tr -d ' ')
+    if [ $rf_files -gt 0 ]; then
+        find "$WORKING_DIR" -name "._*" -delete 2>/dev/null
+        log_info "Removed $rf_files resource fork files"
+        ((cleaned_count++))
+    fi
+    
+    # Remove other OS metadata directories/files
+    local metadata_items=(
+        ".Spotlight-V100"
+        ".fseventsd" 
+        ".Trashes"
+        ".TemporaryItems"
+        "Thumbs.db"
+        ".DocumentRevisions-V100"
+    )
+    
+    for item in "${metadata_items[@]}"; do
+        if find "$WORKING_DIR" -name "$item" -exec rm -rf {} + 2>/dev/null; then
+            log_info "Removed $item metadata"
+            ((cleaned_count++))
+        fi
+    done
+    
+    # Remove empty directories that might have been left behind
+    find "$WORKING_DIR" -type d -empty -delete 2>/dev/null
+    
+    if [ $cleaned_count -gt 0 ]; then
+        log_success "Cleaned $cleaned_count types of metadata files"
+    else
+        log_success "No metadata files found to clean"
+    fi
+}
+
 # Main execution
 main() {
     echo -e "${PURPLE}"
@@ -358,6 +408,7 @@ main() {
     copy_playground_content
     estimate_content_size || exit 1  # Check size of built content before cleaning SD
     clean_sd_card
+    clean_metadata # Clean metadata before deployment
     deploy_to_sd_card
     create_summary
     cleanup
