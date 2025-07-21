@@ -27,6 +27,44 @@ log_warning() { echo -e "${YELLOW}⚠️  $1${NC}"; }
 log_error() { echo -e "${RED}❌ $1${NC}"; }
 log_step() { echo -e "${PURPLE}🔄 $1${NC}"; }
 
+# List of OS metadata file patterns (constant)
+OS_METADATA_PATTERNS=(
+    ".DS_Store"
+    "._*"
+    ".Spotlight-V100"
+    ".fseventsd"
+    ".Trashes"
+    ".TemporaryItems"
+    "Thumbs.db"
+    ".DocumentRevisions-V100"
+)
+
+# Additional ignore patterns (constant)
+IGNORE_PATTERNS=(
+    ".git"
+    "Wav_Player"
+    "*.wav"
+    "*.WAV"
+    "*.mp3"
+    "*.MP3"
+)
+
+# Variables to track metadata cleanup stats
+META_FOUND_WORK=0
+META_CLEANED_WORK=0
+META_FOUND_SD=0
+META_CLEANED_SD=0
+
+# Helper to build rsync --exclude args from pattern arrays
+build_rsync_excludes() {
+    local patterns=("${@}")
+    local args=()
+    for pattern in "${patterns[@]}"; do
+        args+=(--exclude="$pattern")
+    done
+    echo "${args[@]}"
+}
+
 # Function to check prerequisites
 check_prerequisites() {
     log_step "Checking prerequisites..."
@@ -86,31 +124,6 @@ update_playground_repo() {
     log_success "Playground repository updated successfully"
 }
 
-# Function to clean existing playground content
-clean_sd_card() {
-    log_step "Cleaning existing playground content from SD card..."
-    
-    local cleaned_count=0
-    
-    # List of standard Flipper directories that might have playground content
-    local flipper_dirs=(
-        "apps" "badusb" "subghz" "nfc" "rfid" "infrared" 
-        "music_player" "gpio" "lfrfid" "ibutton" "wav_player"
-        "apps_data" "dolphin"
-    )
-    
-    for dir in "${flipper_dirs[@]}"; do
-        local playground_path="$SD_MOUNT/$dir/playground"
-        if [ -d "$playground_path" ]; then
-            log_info "Cleaning $dir/playground/"
-            rm -rf "$playground_path"
-            ((cleaned_count++))
-        fi
-    done
-    
-    log_success "Cleaned $cleaned_count directories from SD card"
-}
-
 # Function to create working directory structure
 setup_working_directory() {
     log_step "Setting up local working directory..."
@@ -150,71 +163,33 @@ copy_playground_content() {
     
     local copied_count=0
     local total_size=0
-    
-    # Directory mappings (source:destination format)
-    local mappings=(
-        "Applications:apps/playground"
-        "BadUSB:badusb/playground"
-        "Sub-GHz:subghz/playground"
-        "NFC:nfc/playground"
-        "RFID:rfid/playground"
-        "Infrared:infrared/playground"
-        "Music_Player:music_player/playground"
-        "GPIO:gpio/playground"
-        "Graphics:apps_data/playground"
-        "flipper_toolbox:apps_data/playground"
-    )
-    
-    # Function to copy a directory if it exists
-    copy_dir_if_exists() {
-        local source="$1"
-        local dest="$2"
-        
-        if [ -d "$PLAYGROUND_DIR/$source" ]; then
-            log_info "Copying $source/ → $dest/ (excluding large files)"
-            rsync -qa --mkpath \
-                --exclude='.git' \
-                --exclude='.DS_Store' \
-                --exclude='*.wav' \
-                --exclude='*.WAV' \
-                --exclude='*.mp3' \
-                --exclude='*.MP3' \
-                --exclude='Wav_Player' \
-                "$PLAYGROUND_DIR/$source/" "$WORKING_DIR/$dest/"
-            
-            # Calculate size
-            local dir_size=$(du -sk "$WORKING_DIR/$dest" | cut -f1 2>/dev/null || echo "0")
-            total_size=$((total_size + dir_size))
-            
-            ((copied_count++))
-            log_success "✓ $source copied (audio files excluded)"
-            return 0
-        fi
-        return 1
-    }
-    
-    # Process all mappings
-    local known_dirs=""
-    for mapping in "${mappings[@]}"; do
-        local source_dir="${mapping%:*}"
-        local dest_dir="${mapping#*:}"
-        known_dirs="$known_dirs $source_dir"
-        copy_dir_if_exists "$source_dir" "$dest_dir"
-    done
-    
-    # Copy any additional directories we might have missed
-    log_info "Scanning for additional content..."
+
+    # Build rsync exclude args (combine ignore + metadata)
+    local EXCLUDES=("${IGNORE_PATTERNS[@]}" "${OS_METADATA_PATTERNS[@]}")
+    local RSYNC_EXCLUDES=( $(build_rsync_excludes "${EXCLUDES[@]}") )
+
+    # Dynamically map Playground folders to working dir if SD root folder exists
     for item in "$PLAYGROUND_DIR"/*; do
-        if [ -d "$item" ] && [ ! -L "$item" ]; then
-            local basename=$(basename "$item")
-            # Skip if we already processed it or if it's a git/system directory
-            if [[ ! " $known_dirs " =~ " ${basename} " ]] && [[ "$basename" != .* ]]; then
-                log_warning "Found unmapped directory: $basename"
-                copy_dir_if_exists "$basename" "apps_data/playground/$basename"
-            fi
+        local basename=$(basename "$item")
+        # Skip if not a directory, is a symlink, or is Wav_Player
+        if [ ! -d "$item" ] || [ -L "$item" ] || [ "$basename" = "Wav_Player" ]; then
+            continue
+        fi
+        # Only map if SD root has this folder
+        if [ -d "$SD_MOUNT/$basename" ]; then
+            local dest="$WORKING_DIR/$basename/playground"
+            mkdir -p "$dest"
+            log_info "Copying $basename/ → $basename/playground"
+            rsync -qa --mkpath \
+                ${RSYNC_EXCLUDES[@]} \
+                "$PLAYGROUND_DIR/$basename/" "$dest/"
+            # Calculate size
+            local dir_size=$(du -sk "$dest" | cut -f1 2>/dev/null || echo "0")
+            total_size=$((total_size + dir_size))
+            ((copied_count++))
+            log_success "✓ $basename copied"
         fi
     done
-    
     log_success "Copied $copied_count content directories ($(echo "scale=1; $total_size/1024" | bc)MB total)"
 }
 
@@ -293,12 +268,24 @@ deploy_to_sd_card() {
         log_error "Aborting deployment due to insufficient space"
         return 1
     fi
-    
-    # Deploy working directory to SD card
-    log_info "Copying all organized content to SD card..."
-    rsync -avh --info=progress2 --exclude='.DS_Store' "$WORKING_DIR/" "$SD_MOUNT/"
-    
-    log_success "All content deployed successfully to SD card"
+
+    # Build rsync exclude args (combine ignore + metadata)
+    local EXCLUDES=("${IGNORE_PATTERNS[@]}" "${OS_METADATA_PATTERNS[@]}")
+    local RSYNC_EXCLUDES=( $(build_rsync_excludes "${EXCLUDES[@]}") )
+
+    # For each folder in SD root, if working dir has playground content, sync it
+    for dir in "$SD_MOUNT"/*; do
+        local basename=$(basename "$dir")
+        local src="$WORKING_DIR/$basename/playground/"
+        local dst="$SD_MOUNT/$basename/playground/"
+        if [ -d "$src" ]; then
+            log_info "Syncing $basename/playground/ to SD card..."
+            # rsync -avh --delete --info=progress2 ${RSYNC_EXCLUDES[@]} "$src" "$dst" # Uncomment for verbose output
+            rsync -avh --inplace --delete --info=stats ${RSYNC_EXCLUDES[@]} "$src" "$dst"
+        fi
+    done
+
+    log_success "All playground content synchronized to SD card efficiently"
 }
 
 # Function to create deployment summary
@@ -323,7 +310,13 @@ create_summary() {
     echo -e "${GREEN}✅ Applications:${NC} $app_count FAP files"
     echo -e "${GREEN}✅ Music files:${NC} $music_count files"
     echo ""
-    
+
+    # Metadata cleanup stats
+    echo -e "${CYAN}🧹 Metadata Cleanup:${NC}"
+    echo "   • Working directory:  Found $META_FOUND_WORK, Cleaned $META_CLEANED_WORK"
+    echo "   • SD card:           Found $META_FOUND_SD, Cleaned $META_CLEANED_SD"
+    echo ""
+
     # Calculate total used space
     local total_used=$(df -h "$SD_MOUNT" | awk 'NR==2{print $3}')
     local total_avail=$(df -h "$SD_MOUNT" | awk 'NR==2{print $4}')
@@ -343,53 +336,47 @@ cleanup() {
     fi
 }
 
-# Function to clean OS metadata from working directory
+# Function to clean OS metadata from a target directory
 clean_metadata() {
-    log_step "Cleaning OS metadata files from working directory..."
-    
+    local target_dir="$1"
+    log_step "Cleaning OS metadata files from $target_dir..."
     local cleaned_count=0
-    
-    # Remove .DS_Store files
-    if find "$WORKING_DIR" -name ".DS_Store" -delete 2>/dev/null; then
-        local ds_count=$(find "$WORKING_DIR" -name ".DS_Store" 2>/dev/null | wc -l | tr -d ' ')
-        if [ $ds_count -eq 0 ]; then
-            log_info "Removed .DS_Store files"
-            ((cleaned_count++))
-        fi
-    fi
-    
-    # Remove ._* resource fork files
-    local rf_files=$(find "$WORKING_DIR" -name "._*" 2>/dev/null | wc -l | tr -d ' ')
-    if [ $rf_files -gt 0 ]; then
-        find "$WORKING_DIR" -name "._*" -delete 2>/dev/null
-        log_info "Removed $rf_files resource fork files"
-        ((cleaned_count++))
-    fi
-    
-    # Remove other OS metadata directories/files
-    local metadata_items=(
-        ".Spotlight-V100"
-        ".fseventsd" 
-        ".Trashes"
-        ".TemporaryItems"
-        "Thumbs.db"
-        ".DocumentRevisions-V100"
-    )
-    
-    for item in "${metadata_items[@]}"; do
-        if find "$WORKING_DIR" -name "$item" -exec rm -rf {} + 2>/dev/null; then
-            log_info "Removed $item metadata"
+    for pattern in "${OS_METADATA_PATTERNS[@]}"; do
+        local matches=$(find "$target_dir" -name "$pattern" 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$matches" -gt 0 ]; then
+            find "$target_dir" -name "$pattern" -exec rm -rf {} + 2>/dev/null
+            log_info "Removed $matches $pattern files"
             ((cleaned_count++))
         fi
     done
-    
     # Remove empty directories that might have been left behind
-    find "$WORKING_DIR" -type d -empty -delete 2>/dev/null
-    
+    find "$target_dir" -type d -empty -delete 2>/dev/null
     if [ $cleaned_count -gt 0 ]; then
         log_success "Cleaned $cleaned_count types of metadata files"
     else
         log_success "No metadata files found to clean"
+    fi
+}
+
+# Function to scan for OS metadata files in a target directory
+scan_metadata() {
+    local target_dir="$1"
+    log_step "Scanning $target_dir for OS metadata files..."
+    local find_expr=""
+    for pattern in "${OS_METADATA_PATTERNS[@]}"; do
+        find_expr+=" -o -name '$pattern'"
+    done
+    find_expr=${find_expr# -o } # Remove leading -o
+    SCAN_METADATA_FILES=$(eval find "$target_dir" \( $find_expr \) 2>/dev/null)
+    SCAN_METADATA_COUNT=$(echo "$SCAN_METADATA_FILES" | grep -c "/")
+    SCAN_METADATA_COUNT=${SCAN_METADATA_COUNT:-0}
+    if [ "$SCAN_METADATA_COUNT" -gt 0 ]; then
+        log_warning "Found $SCAN_METADATA_COUNT OS metadata files in $target_dir."
+        echo "$SCAN_METADATA_FILES"
+        return 0
+    else
+        log_success "No OS metadata files found in $target_dir."
+        return 1
     fi
 }
 
@@ -400,19 +387,63 @@ main() {
     echo "====================================="
     echo -e "${CYAN}📦 Source: UberGuidoZ/Flipper (via Playground)${NC}"
     echo ""
-    
+
     # Execute all steps
     check_prerequisites
     update_playground_repo
     setup_working_directory
     copy_playground_content
     estimate_content_size || exit 1  # Check size of built content before cleaning SD
-    clean_sd_card
-    clean_metadata # Clean metadata before deployment
+
+    # Scan for OS metadata files in working directory and prompt for cleanup if found
+    if scan_metadata "$WORKING_DIR"; then
+        META_FOUND_WORK=$SCAN_METADATA_COUNT
+        echo
+        echo "${YELLOW}⚠️  Notice: Found $SCAN_METADATA_COUNT OS metadata files in working directory before deployment.${NC}"
+        echo "These are not needed and can be safely removed."
+        echo "Do you want to clean them up now? (y/N) "
+        read -r CLEAN_WORK_META
+        if [[ "$CLEAN_WORK_META" =~ ^[Yy]$ ]]; then
+            echo "$SCAN_METADATA_FILES" | while read -r file; do
+                if [ -e "$file" ]; then
+                    rm -rf "$file"
+                    log_info "Removed $file"
+                fi
+            done
+            META_CLEANED_WORK=$SCAN_METADATA_COUNT
+            log_success "Cleaned $SCAN_METADATA_COUNT OS metadata files in working directory."
+        else
+            log_info "Skipped cleaning OS metadata files in working directory."
+        fi
+    fi
+
     deploy_to_sd_card
-    create_summary
     cleanup
-    
+
+    # Scan for OS metadata files on SD card and prompt for cleanup if found
+    if scan_metadata "$SD_MOUNT"; then
+        META_FOUND_SD=$SCAN_METADATA_COUNT
+        echo
+        echo "${YELLOW}⚠️  Notice: Found $SCAN_METADATA_COUNT OS metadata files on SD card.${NC}"
+        echo "These are not needed and can be safely removed."
+        echo "Do you want to clean them up now? (y/N) "
+        read -r CLEAN_SD_META
+        if [[ "$CLEAN_SD_META" =~ ^[Yy]$ ]]; then
+            echo "$SCAN_METADATA_FILES" | while read -r file; do
+                if [ -e "$file" ]; then
+                    rm -rf "$file"
+                    log_info "Removed $file"
+                fi
+            done
+            META_CLEANED_SD=$SCAN_METADATA_COUNT
+            log_success "Cleaned $SCAN_METADATA_COUNT OS metadata files on SD card."
+        else
+            log_info "Skipped cleaning OS metadata files on SD card."
+        fi
+    fi
+
+    create_summary
+
     echo ""
     echo -e "${GREEN}🎉 SD Card build complete!${NC}"
     echo -e "${CYAN}💡 Your Flipper Zero is ready with the latest UberGuidoZ content${NC}"
