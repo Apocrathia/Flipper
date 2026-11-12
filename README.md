@@ -31,16 +31,16 @@ outside `playground/` folders and `apps/` is touched.
 Repo folders map onto the Flipper's SD layout in `map_to_sd_category` in
 `build-sd.sh`:
 
-| Repo folder | Lands at | What it is |
-| ----------- | -------- | ---------- |
-| BadUSB | `/badusb/playground/` | keystroke payloads |
-| Sub-GHz | `/subghz/playground/` | radio captures and tools |
-| NFC | `/nfc/playground/` | NFC files and amiibo |
-| Infrared | `/infrared/playground/` | IR remote databases |
-| RFID | `/lfrfid/playground/` | low-frequency RFID utilities |
-| Music_Player | `/music_player/playground/` | RTTTL tones |
-| subplaylist | `/subplaylist/playground/` | Sub-GHz playlists |
-| Dolphin_Level, Graphics | `/dolphin/playground/` | dolphin level hacks, custom animations |
+| Repo folder             | Lands at                    | What it is                             |
+| ----------------------- | --------------------------- | -------------------------------------- |
+| BadUSB                  | `/badusb/playground/`       | keystroke payloads                     |
+| Sub-GHz                 | `/subghz/playground/`       | radio captures and tools               |
+| NFC                     | `/nfc/playground/`          | NFC files and amiibo                   |
+| Infrared                | `/infrared/playground/`     | IR remote databases                    |
+| RFID                    | `/lfrfid/playground/`       | low-frequency RFID utilities           |
+| Music_Player            | `/music_player/playground/` | RTTTL tones                            |
+| subplaylist             | `/subplaylist/playground/`  | Sub-GHz playlists                      |
+| Dolphin_Level, Graphics | `/dolphin/playground/`      | dolphin level hacks, custom animations |
 
 Repo folders with no SD equivalent (`picopass`, `unirf`, `GPIO`,
 `Wav_Player`, firmware variants, docs) are skipped. Categories with no
