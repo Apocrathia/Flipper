@@ -6,8 +6,8 @@ This repository provides a streamlined system to build and maintain a comprehens
 
 This system automatically organizes content from UberGuidoZ's Flipper repository into a properly structured SD card:
 
-- **Content Source**: [UberGuidoZ's Flipper Repository](https://github.com/UberGuidoZ/Flipper) (via Playground directory)
-- **Automation**: Single script handles everything automatically
+- **Content Sources**: [UberGuidoZ's Flipper Repository](https://github.com/UberGuidoZ/Flipper) (via Playground directory) + [Gutierre0x80/FlipperAmiiboCollection](https://github.[AWS_SECRET_KEY_STANDALONE_REDACTED]) (fresh amiibo NFC files)
+- **Automation**: Single script handles everything automatically, no interactive prompts
 
 ## 🛠️ Script Overview
 
@@ -26,19 +26,42 @@ The main script that handles everything:
 
 ## 📦 Content Categories
 
-Your SD card will be organized with:
+The script maps UberGuidoZ repo folders (Title_Case) onto the Flipper's standard
+lowercase SD layout with an explicit mapping table (`map_to_sd_category` in
+`build-sd.sh`):
 
-| Category         | Description                      | Location                    |
-| ---------------- | -------------------------------- | --------------------------- |
-| **BadUSB**       | Keystroke injection payloads     | `/badusb/playground/`       |
-| **Sub-GHz**      | Radio frequency captures & tools | `/subghz/playground/`       |
-| **NFC**          | Near-field communication files   | `/nfc/playground/`          |
-| **Infrared**     | IR remote control databases      | `/infrared/playground/`     |
-| **RFID**         | RFID tag files and utilities     | `/rfid/playground/`         |
-| **Music Player** | RTTTL tones and audio files      | `/music_player/playground/` |
-| **Applications** | External FAP applications        | `/apps/playground/`         |
-| **GPIO**         | Hardware interfacing tools       | `/gpio/playground/`         |
-| **Graphics**     | Flipper animations and artwork   | `/apps_data/playground/`    |
+| Repo folder      | SD category                  | Content                              |
+| ---------------- | ---------------------------- | ------------------------------------ |
+| **BadUSB**       | `/badusb/playground/`        | Keystroke injection payloads         |
+| **Sub-GHz**      | `/subghz/playground/`        | Radio frequency captures & tools     |
+| **NFC**          | `/nfc/playground/`            | Near-field communication files      |
+| **Infrared**     | `/infrared/playground/`      | IR remote control databases          |
+| **RFID**         | `/lfrfid/playground/`         | Low-frequency RFID utilities         |
+| **Music_Player** | `/music_player/playground/`   | RTTTL tones                          |
+| **subplaylist**  | `/subplaylist/playground/`   | Sub-GHz playlist files               |
+| **Applications** | `/apps/playground/`           | External FAP applications            |
+| **Dolphin_Level**| `/dolphin/playground/`        | Dolphin level/state hacks, customs   |
+| **Graphics**     | `/dolphin/playground/`        | Custom animations, wallpapers, art   |
+
+Repo folders with no Flipper SD equivalent (tools, firmware variants, docs-only
+folders like `picopass`, `unirf`, `Wifi_DevBoard`, `GPIO`, `Wav_Player`) are
+skipped. Categories with no content are never deployed, so no empty
+`playground/` directories are created.
+
+### Amiibo
+
+Amiibo NFC files come from two sources:
+
+- **`UberGuidoZ/NFC/Amiibo/Amiibo_Collection`** (Gioman101/FlipperAmiibo
+  submodule) → `/nfc/playground/Amiibo/Amiibo_Collection/` — includes the
+  Tears of the Kingdom Zelda set.
+- **[Gutierre0x80/FlipperAmiiboCollection](https://github.com/Gutierre0x80/FlipperAmiiboCollection)**
+  (2026 refresh, cleaned + NTAG215-fixed) →
+  `/nfc/playground/Amiibo/Amiibo_Collection_2026/`
+
+The stale 2023 amiibo ZIPs (`NFC/Amiibo/Amiibo_Files/`) are excluded from
+deployment — the Flipper cannot read zips and their contents are superseded
+by the collections above.
 
 ## 🚀 Quick Start
 
@@ -67,7 +90,7 @@ This single command will:
 
 ### Advanced Usage
 
-- **Custom mount point**: Edit the `SD_MOUNT` variable in `build-sd.sh` to change `/Volumes/FLIPPER SD/` path
+- **Custom mount point**: Set the `SD_MOUNT` environment variable (default: `/Volumes/FLIPPER SD`), e.g. `SD_MOUNT=/Volumes/OtherCard ./build-sd.sh`
 - **Content filtering**: Modify the script logic to exclude categories if needed
 
 ## ⚠️ Important Considerations
@@ -99,8 +122,10 @@ This single command will:
 ```
 Flipper/
 ├── build-sd.sh          # Main deployment script (everything you need!)
-├── Playground/          # UberGuidoZ repository content (auto-managed)
+├── Playground/          # UberGuidoZ repository clone (auto-managed, shallow)
+├── AmiiboCollection/    # Gutierre0x80 amiibo collection clone (auto-managed)
 ├── SD/                  # Working directory (created/cleaned automatically)
+├── .scratch/            # Reports, backups, staged downloads (gitignored)
 └── README.md            # This file
 ```
 
@@ -121,10 +146,26 @@ Flipper/
 **Simple workflow:**
 
 ```bash
-./build-sd.sh    # Updates repository + deploys latest content
+./build-sd.sh    # Updates repositories + deploys latest content
 ```
 
 Run this monthly or whenever you want the latest community content.
+
+## 🔧 Firmware Updates
+
+This script manages SD content only. Firmware is updated separately:
+
+1. **qFlipper (recommended)**: Install → "Install from file" → the
+   `flipper-z-f7-update-unlshd-XXe.tgz` bundle from the latest
+   [DarkFlippers release](https://github.com/DarkFlippers/unleashed-firmware/releases).
+2. **SD-card flow**: extract the `.tgz`, copy the `f7-update-*/` folder to
+   `/update/` on the SD card, then run `update.fuf` from the device's
+   Files app (it also auto-prompts at boot).
+3. **Web installer**: <https://web.unleashedflip.com> (close qFlipper first).
+
+After a firmware update that bumps the API version, **run `./build-sd.sh`** —
+the live app catalog step refreshes FAPs to the new API (stale FAPs will not
+launch). Update firmware first, then run the script.
 
 ### Troubleshooting
 
@@ -132,7 +173,7 @@ Run this monthly or whenever you want the latest community content.
 - **Permission Errors**: Ensure SD card is writable
 - **Space Issues**: Script will warn you - consider larger SD card or content filtering
 - **Git Errors**: Check internet connection and repository access
-- **Metadata Files**: Script will prompt to clean up OS metadata files if found
+- **Metadata Files**: Script automatically removes OS metadata files (`._*`, `.DS_Store`, etc.) from the build and the SD card
 - **Size Problems**: Check script output for space requirements vs. available space
 
 ## 🎯 What Makes This Better

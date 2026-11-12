@@ -6,10 +6,39 @@
 set -e  # Exit on any error
 
 # Configuration
-SD_MOUNT="/Volumes/FLIPPER SD"
+SD_MOUNT="${SD_MOUNT:-/Volumes/FLIPPER SD}"
 WORKING_DIR="SD"
 PLAYGROUND_DIR="Playground"
 PLAYGROUND_REPO="https://github.com/UberGuidoZ/Flipper"
+AMIIBO_DIR="AmiiboCollection"
+AMIIBO_REPO="https://github.com/Gutierre0x80/FlipperAmiiboCollection"
+
+# Map a Playground top-level directory to its SD card category dir.
+# Repo dirs use Title_Case names; the Flipper SD layout is lowercase.
+# Unmapped repo dirs (tools, firmware variants, docs-only folders) are skipped.
+map_to_sd_category() {
+    case "$1" in
+        BadUSB)              echo badusb ;;
+        Sub-GHz)             echo subghz ;;
+        NFC)                 echo nfc ;;
+        Infrared)            echo infrared ;;
+        RFID)                echo lfrfid ;;
+        Music_Player)        echo music_player ;;
+        subplaylist)         echo subplaylist ;;
+        Dolphin_Level|Graphics) echo dolphin ;;
+        *)                   return 1 ;;
+    esac
+}
+
+# All SD categories that receive Playground content (deduped)
+sd_categories() {
+    echo "badusb subghz nfc infrared lfrfid music_player subplaylist dolphin"
+}
+
+# The live app catalog is deployed separately from the playground stash:
+# RM-built FAPs are interchangeable between RogueMaster and Unleashed firmware
+# (see Playground/Applications/ReadMe.md), and are organized by app category.
+APP_CATALOG_SRC="$PLAYGROUND_DIR/Applications/Custom (UL, RM)/RogueMaster"
 
 # Colors for output
 RED='\033[0;31m'
@@ -50,10 +79,9 @@ IGNORE_PATTERNS=(
 )
 
 # Variables to track metadata cleanup stats
-META_FOUND_WORK=0
 META_CLEANED_WORK=0
-META_FOUND_SD=0
 META_CLEANED_SD=0
+LAST_CLEAN_COUNT=0
 
 # Helper to build rsync --exclude args from pattern arrays
 build_rsync_excludes() {
@@ -63,6 +91,12 @@ build_rsync_excludes() {
         args+=(--exclude="$pattern")
     done
     echo "${args[@]}"
+}
+
+# Combined exclude list for content copies and deploys
+all_rsync_excludes() {
+    local EXCLUDES=("${IGNORE_PATTERNS[@]}" "${OS_METADATA_PATTERNS[@]}" "Amiibo_Files")
+    build_rsync_excludes "${EXCLUDES[@]}"
 }
 
 # Function to check prerequisites
@@ -82,15 +116,21 @@ check_prerequisites() {
         exit 1
     fi
     
-    # Check if source directories exist
-    if [ ! -d "$PLAYGROUND_DIR" ]; then
-        log_error "Playground directory not found: $PLAYGROUND_DIR"
+    # Check for git (needed to clone/update Playground repo)
+    if ! command -v git &> /dev/null; then
+        log_error "Git is required but not installed"
         exit 1
     fi
     
-    # Check for git (needed to update Playground repo)
-    if ! command -v git &> /dev/null; then
-        log_error "Git is required but not installed"
+    # Check for rsync (needed to build and deploy content)
+    if ! command -v rsync &> /dev/null; then
+        log_error "rsync is required but not installed"
+        exit 1
+    fi
+    
+    # Check for bc (used for size reporting)
+    if ! command -v bc &> /dev/null; then
+        log_error "bc is required but not installed"
         exit 1
     fi
     
@@ -100,6 +140,14 @@ check_prerequisites() {
 # Function to update Playground repository
 update_playground_repo() {
     log_step "Updating Playground repository..."
+    
+    # Clone the repository if it doesn't exist yet
+    if [ ! -d "$PLAYGROUND_DIR/.git" ]; then
+        log_info "Playground directory not found, cloning fresh..."
+        git clone --depth 1 --shallow-submodules --recurse-submodules "$PLAYGROUND_REPO" "$PLAYGROUND_DIR"
+        log_success "Playground repository cloned successfully"
+        return
+    fi
     
     cd "$PLAYGROUND_DIR"
     
@@ -128,33 +176,13 @@ update_playground_repo() {
 setup_working_directory() {
     log_step "Setting up local working directory..."
     
-    # Clean and create working directory
+    # Clean and create working directory (category dirs are created during copy)
     if [ -d "$WORKING_DIR" ]; then
         rm -rf "$WORKING_DIR"
     fi
     mkdir -p "$WORKING_DIR"
     
-    # Create standard Flipper directory structure
-    local standard_dirs=(
-        "apps/playground"
-        "badusb/playground" 
-        "subghz/playground"
-        "nfc/playground"
-        "rfid/playground"
-        "infrared/playground"
-        "music_player/playground"
-        "gpio/playground"
-        "lfrfid/playground"
-        "ibutton/playground"
-        "apps_data/playground"
-        "dolphin/playground"
-    )
-    
-    for dir in "${standard_dirs[@]}"; do
-        mkdir -p "$WORKING_DIR/$dir"
-    done
-    
-    log_success "Local working directory structure created"
+    log_success "Local working directory created"
 }
 
 # Function to copy Playground content with comprehensive mapping
@@ -165,32 +193,78 @@ copy_playground_content() {
     local total_size=0
 
     # Build rsync exclude args (combine ignore + metadata)
-    local EXCLUDES=("${IGNORE_PATTERNS[@]}" "${OS_METADATA_PATTERNS[@]}")
-    local RSYNC_EXCLUDES=( $(build_rsync_excludes "${EXCLUDES[@]}") )
+    local RSYNC_EXCLUDES=( $(all_rsync_excludes) )
 
-    # Dynamically map Playground folders to working dir if SD root folder exists
+    # Map Playground folders to working dir via explicit category mapping
     for item in "$PLAYGROUND_DIR"/*; do
         local basename=$(basename "$item")
-        # Skip if not a directory, is a symlink, or is Wav_Player
-        if [ ! -d "$item" ] || [ -L "$item" ] || [ "$basename" = "Wav_Player" ]; then
+        # Skip if not a directory or is a symlink
+        if [ ! -d "$item" ] || [ -L "$item" ]; then
             continue
         fi
-        # Only map if SD root has this folder
-        if [ -d "$SD_MOUNT/$basename" ]; then
-            local dest="$WORKING_DIR/$basename/playground"
-            mkdir -p "$dest"
-            log_info "Copying $basename/ → $basename/playground"
-            rsync -qa --mkpath \
-                ${RSYNC_EXCLUDES[@]} \
-                "$PLAYGROUND_DIR/$basename/" "$dest/"
-            # Calculate size
-            local dir_size=$(du -sk "$dest" | cut -f1 2>/dev/null || echo "0")
-            total_size=$((total_size + dir_size))
-            ((copied_count++))
-            log_success "✓ $basename copied"
-        fi
+        local sd_dir
+        sd_dir=$(map_to_sd_category "$basename") || continue
+        local dest="$WORKING_DIR/$sd_dir/playground"
+        mkdir -p "$dest"
+        log_info "Copying $basename/ → $sd_dir/playground"
+        rsync -qa \
+            ${RSYNC_EXCLUDES[@]} \
+            "$PLAYGROUND_DIR/$basename/" "$dest/"
+        # Calculate size
+        local dir_size=$(du -sk "$dest" | cut -f1 2>/dev/null || echo "0")
+        total_size=$((total_size + dir_size))
+        ((copied_count++))
+        log_success "✓ $basename → $sd_dir"
     done
     log_success "Copied $copied_count content directories ($(echo "scale=1; $total_size/1024" | bc)MB total)"
+}
+
+# Function to update the amiibo collection repository
+update_amiibo_repo() {
+    log_step "Updating amiibo collection repository..."
+    
+    if [ ! -d "$AMIIBO_DIR/.git" ]; then
+        log_info "Amiibo collection not found, cloning fresh..."
+        git clone --depth 1 "$AMIIBO_REPO" "$AMIIBO_DIR"
+        log_success "Amiibo collection cloned successfully"
+        return
+    fi
+    
+    (cd "$AMIIBO_DIR" && git pull origin main)
+    log_success "Amiibo collection updated successfully"
+}
+
+# Function to copy amiibo collection into the working directory
+copy_amiibo_content() {
+    log_step "Copying amiibo collection to working directory..."
+    
+    local RSYNC_EXCLUDES=( $(all_rsync_excludes) )
+    local dest="$WORKING_DIR/nfc/playground/Amiibo/Amiibo_Collection_2026"
+    mkdir -p "$dest"
+    rsync -qa \
+        ${RSYNC_EXCLUDES[@]} \
+        "$AMIIBO_DIR/Amiibo/" "$dest/"
+    local count=$(find "$dest" -name "*.nfc" | wc -l | tr -d ' ')
+    log_success "Amiibo collection deployed ($count NFC files)"
+}
+
+# Function to deploy the live app catalog (RM builds, category-organized)
+deploy_app_catalog() {
+    log_step "Deploying app catalog to SD card..."
+    
+    if [ ! -d "$APP_CATALOG_SRC" ]; then
+        log_warning "App catalog source not found: $APP_CATALOG_SRC"
+        return 0
+    fi
+    
+    local RSYNC_EXCLUDES=( $(all_rsync_excludes) )
+    local count=$(find "$APP_CATALOG_SRC" -name "*.fap" | wc -l | tr -d ' ')
+    log_info "Syncing $count FAPs → apps/ (RM/UL-compatible builds)"
+    # --delete refreshes stale FAPs; playground/ (script stash) is preserved
+    rsync -qa --delete --exclude=playground \
+        ${RSYNC_EXCLUDES[@]} \
+        "$APP_CATALOG_SRC/" "$SD_MOUNT/apps/"
+    log_success "App catalog synchronized to SD card"
 }
 
 # Function to estimate content size before cleaning SD card
@@ -270,19 +344,20 @@ deploy_to_sd_card() {
     fi
 
     # Build rsync exclude args (combine ignore + metadata)
-    local EXCLUDES=("${IGNORE_PATTERNS[@]}" "${OS_METADATA_PATTERNS[@]}")
-    local RSYNC_EXCLUDES=( $(build_rsync_excludes "${EXCLUDES[@]}") )
+    local RSYNC_EXCLUDES=( $(all_rsync_excludes) )
 
-    # For each folder in SD root, if working dir has playground content, sync it
-    for dir in "$SD_MOUNT"/*; do
-        local basename=$(basename "$dir")
-        local src="$WORKING_DIR/$basename/playground/"
-        local dst="$SD_MOUNT/$basename/playground/"
-        if [ -d "$src" ]; then
-            log_info "Syncing $basename/playground/ to SD card..."
-            # rsync -avh --delete --info=progress2 ${RSYNC_EXCLUDES[@]} "$src" "$dst" # Uncomment for verbose output
-            rsync -avh --inplace --delete --info=stats ${RSYNC_EXCLUDES[@]} "$src" "$dst"
+    # Deploy each mapped SD category that has built content
+    local sd_dir src dst
+    for sd_dir in $(sd_categories); do
+        src="$WORKING_DIR/$sd_dir/playground/"
+        # Skip empty builds so we never create empty playground dirs on the SD
+        if [ -z "$(ls -A "${src%/}" 2>/dev/null)" ]; then
+            continue
         fi
+        dst="$SD_MOUNT/$sd_dir/playground/"
+        log_info "Syncing $sd_dir/playground/ to SD card..."
+        # rsync -avh --delete --progress ${RSYNC_EXCLUDES[@]} "$src" "$dst" # Uncomment for verbose output
+        rsync -qa --inplace --delete --stats ${RSYNC_EXCLUDES[@]} "$src" "$dst"
     done
 
     log_success "All playground content synchronized to SD card efficiently"
@@ -313,8 +388,8 @@ create_summary() {
 
     # Metadata cleanup stats
     echo -e "${CYAN}🧹 Metadata Cleanup:${NC}"
-    echo "   • Working directory:  Found $META_FOUND_WORK, Cleaned $META_CLEANED_WORK"
-    echo "   • SD card:           Found $META_FOUND_SD, Cleaned $META_CLEANED_SD"
+    echo "   • Working directory:  Removed $META_CLEANED_WORK files"
+    echo "   • SD card:           Removed $META_CLEANED_SD files"
     echo ""
 
     # Calculate total used space
@@ -340,43 +415,23 @@ cleanup() {
 clean_metadata() {
     local target_dir="$1"
     log_step "Cleaning OS metadata files from $target_dir..."
-    local cleaned_count=0
+    local total_removed=0
     for pattern in "${OS_METADATA_PATTERNS[@]}"; do
-        local matches=$(find "$target_dir" -name "$pattern" 2>/dev/null | wc -l | tr -d ' ')
+        local matches
+        matches=$(find "$target_dir" -name "$pattern" 2>/dev/null | wc -l | tr -d ' ')
         if [ "$matches" -gt 0 ]; then
             find "$target_dir" -name "$pattern" -exec rm -rf {} + 2>/dev/null
+            total_removed=$((total_removed + matches))
             log_info "Removed $matches $pattern files"
-            ((cleaned_count++))
         fi
     done
     # Remove empty directories that might have been left behind
     find "$target_dir" -type d -empty -delete 2>/dev/null
-    if [ $cleaned_count -gt 0 ]; then
-        log_success "Cleaned $cleaned_count types of metadata files"
+    LAST_CLEAN_COUNT=$total_removed
+    if [ $total_removed -gt 0 ]; then
+        log_success "Cleaned $total_removed metadata files from $target_dir"
     else
         log_success "No metadata files found to clean"
-    fi
-}
-
-# Function to scan for OS metadata files in a target directory
-scan_metadata() {
-    local target_dir="$1"
-    log_step "Scanning $target_dir for OS metadata files..."
-    local find_expr=""
-    for pattern in "${OS_METADATA_PATTERNS[@]}"; do
-        find_expr+=" -o -name '$pattern'"
-    done
-    find_expr=${find_expr# -o } # Remove leading -o
-    SCAN_METADATA_FILES=$(eval find "$target_dir" \( $find_expr \) 2>/dev/null)
-    SCAN_METADATA_COUNT=$(echo "$SCAN_METADATA_FILES" | grep -c "/")
-    SCAN_METADATA_COUNT=${SCAN_METADATA_COUNT:-0}
-    if [ "$SCAN_METADATA_COUNT" -gt 0 ]; then
-        log_warning "Found $SCAN_METADATA_COUNT OS metadata files in $target_dir."
-        echo "$SCAN_METADATA_FILES"
-        return 0
-    else
-        log_success "No OS metadata files found in $target_dir."
-        return 1
     fi
 }
 
@@ -385,62 +440,29 @@ main() {
     echo -e "${PURPLE}"
     echo "🐬 Flipper Zero SD Card Builder v2.0"
     echo "====================================="
-    echo -e "${CYAN}📦 Source: UberGuidoZ/Flipper (via Playground)${NC}"
+    echo -e "${CYAN}📦 Sources: UberGuidoZ/Flipper (Playground) + Gutierre0x80/FlipperAmiiboCollection${NC}"
     echo ""
 
     # Execute all steps
     check_prerequisites
     update_playground_repo
+    update_amiibo_repo
     setup_working_directory
     copy_playground_content
+    copy_amiibo_content
     estimate_content_size || exit 1  # Check size of built content before cleaning SD
 
-    # Scan for OS metadata files in working directory and prompt for cleanup if found
-    if scan_metadata "$WORKING_DIR"; then
-        META_FOUND_WORK=$SCAN_METADATA_COUNT
-        echo
-        echo "${YELLOW}⚠️  Notice: Found $SCAN_METADATA_COUNT OS metadata files in working directory before deployment.${NC}"
-        echo "These are not needed and can be safely removed."
-        echo "Do you want to clean them up now? (y/N) "
-        read -r CLEAN_WORK_META
-        if [[ "$CLEAN_WORK_META" =~ ^[Yy]$ ]]; then
-            echo "$SCAN_METADATA_FILES" | while read -r file; do
-                if [ -e "$file" ]; then
-                    rm -rf "$file"
-                    log_info "Removed $file"
-                fi
-            done
-            META_CLEANED_WORK=$SCAN_METADATA_COUNT
-            log_success "Cleaned $SCAN_METADATA_COUNT OS metadata files in working directory."
-        else
-            log_info "Skipped cleaning OS metadata files in working directory."
-        fi
-    fi
+    # Clean OS metadata from the working build (always safe: pure OS junk patterns)
+    clean_metadata "$WORKING_DIR"
+    META_CLEANED_WORK=$LAST_CLEAN_COUNT
 
     deploy_to_sd_card
+    deploy_app_catalog
     cleanup
 
-    # Scan for OS metadata files on SD card and prompt for cleanup if found
-    if scan_metadata "$SD_MOUNT"; then
-        META_FOUND_SD=$SCAN_METADATA_COUNT
-        echo
-        echo "${YELLOW}⚠️  Notice: Found $SCAN_METADATA_COUNT OS metadata files on SD card.${NC}"
-        echo "These are not needed and can be safely removed."
-        echo "Do you want to clean them up now? (y/N) "
-        read -r CLEAN_SD_META
-        if [[ "$CLEAN_SD_META" =~ ^[Yy]$ ]]; then
-            echo "$SCAN_METADATA_FILES" | while read -r file; do
-                if [ -e "$file" ]; then
-                    rm -rf "$file"
-                    log_info "Removed $file"
-                fi
-            done
-            META_CLEANED_SD=$SCAN_METADATA_COUNT
-            log_success "Cleaned $SCAN_METADATA_COUNT OS metadata files on SD card."
-        else
-            log_info "Skipped cleaning OS metadata files on SD card."
-        fi
-    fi
+    # Clean OS metadata from the SD card
+    clean_metadata "$SD_MOUNT"
+    META_CLEANED_SD=$LAST_CLEAN_COUNT
 
     create_summary
 
