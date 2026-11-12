@@ -1,0 +1,18 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: shellcheck
+        run: shellcheck build-sd.sh
+
+      - name: prettier
+        run: npx --yes prettier@3.9.6 --check $(git ls-files '*.md' '*.json' '*.yaml' '*.yml')

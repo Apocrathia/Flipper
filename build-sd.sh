@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Flipper Zero SD Card Builder
-# Comprehensive script to clean, organize, and deploy all content to SD card
+# Builds and deploys Flipper Zero SD card content. See README.md.
 
 set -e  # Exit on any error
 
@@ -56,7 +56,7 @@ log_warning() { echo -e "${YELLOW}⚠️  $1${NC}"; }
 log_error() { echo -e "${RED}❌ $1${NC}"; }
 log_step() { echo -e "${PURPLE}🔄 $1${NC}"; }
 
-# List of OS metadata file patterns (constant)
+# OS metadata junk, removed from builds and the SD card
 OS_METADATA_PATTERNS=(
     ".DS_Store"
     "._*"
@@ -68,7 +68,7 @@ OS_METADATA_PATTERNS=(
     ".DocumentRevisions-V100"
 )
 
-# Additional ignore patterns (constant)
+# Content that stays out of the build
 IGNORE_PATTERNS=(
     ".git"
     "Wav_Player"
@@ -99,7 +99,6 @@ all_rsync_excludes() {
     build_rsync_excludes "${EXCLUDES[@]}"
 }
 
-# Function to check prerequisites
 check_prerequisites() {
     log_step "Checking prerequisites..."
     
@@ -137,7 +136,6 @@ check_prerequisites() {
     log_success "All prerequisites met"
 }
 
-# Function to update Playground repository
 update_playground_repo() {
     log_step "Updating Playground repository..."
     
@@ -172,7 +170,6 @@ update_playground_repo() {
     log_success "Playground repository updated successfully"
 }
 
-# Function to create working directory structure
 setup_working_directory() {
     log_step "Setting up local working directory..."
     
@@ -185,41 +182,36 @@ setup_working_directory() {
     log_success "Local working directory created"
 }
 
-# Function to copy Playground content with comprehensive mapping
 copy_playground_content() {
     log_step "Copying Playground content to local working directory..."
     
     local copied_count=0
     local total_size=0
+    local RSYNC_EXCLUDES
+    read -r -a RSYNC_EXCLUDES <<< "$(all_rsync_excludes)"
 
-    # Build rsync exclude args (combine ignore + metadata)
-    local RSYNC_EXCLUDES=( $(all_rsync_excludes) )
-
-    # Map Playground folders to working dir via explicit category mapping
     for item in "$PLAYGROUND_DIR"/*; do
-        local basename=$(basename "$item")
-        # Skip if not a directory or is a symlink
+        # Skip files and symlinks
         if [ ! -d "$item" ] || [ -L "$item" ]; then
             continue
         fi
-        local sd_dir
-        sd_dir=$(map_to_sd_category "$basename") || continue
-        local dest="$WORKING_DIR/$sd_dir/playground"
+        local dir_name sd_dir dest dir_size
+        dir_name=$(basename "$item")
+        sd_dir=$(map_to_sd_category "$dir_name") || continue
+        dest="$WORKING_DIR/$sd_dir/playground"
         mkdir -p "$dest"
-        log_info "Copying $basename/ → $sd_dir/playground"
+        log_info "Copying $dir_name/ → $sd_dir/playground"
         rsync -qa \
-            ${RSYNC_EXCLUDES[@]} \
-            "$PLAYGROUND_DIR/$basename/" "$dest/"
-        # Calculate size
-        local dir_size=$(du -sk "$dest" | cut -f1 2>/dev/null || echo "0")
+            "${RSYNC_EXCLUDES[@]}" \
+            "$PLAYGROUND_DIR/$dir_name/" "$dest/"
+        dir_size=$(du -sk "$dest" | cut -f1 2>/dev/null || echo "0")
         total_size=$((total_size + dir_size))
-        ((copied_count++))
-        log_success "✓ $basename → $sd_dir"
+        copied_count=$((copied_count + 1))
+        log_success "✓ $dir_name → $sd_dir"
     done
     log_success "Copied $copied_count content directories ($(echo "scale=1; $total_size/1024" | bc)MB total)"
 }
 
-# Function to update the amiibo collection repository
 update_amiibo_repo() {
     log_step "Updating amiibo collection repository..."
     
@@ -234,21 +226,20 @@ update_amiibo_repo() {
     log_success "Amiibo collection updated successfully"
 }
 
-# Function to copy amiibo collection into the working directory
 copy_amiibo_content() {
     log_step "Copying amiibo collection to working directory..."
     
-    local RSYNC_EXCLUDES=( $(all_rsync_excludes) )
-    local dest="$WORKING_DIR/nfc/playground/Amiibo/Amiibo_Collection_2026"
+    local RSYNC_EXCLUDES dest count
+    read -r -a RSYNC_EXCLUDES <<< "$(all_rsync_excludes)"
+    dest="$WORKING_DIR/nfc/playground/Amiibo/Amiibo_Collection_2026"
     mkdir -p "$dest"
     rsync -qa \
-        ${RSYNC_EXCLUDES[@]} \
+        "${RSYNC_EXCLUDES[@]}" \
         "$AMIIBO_DIR/Amiibo/" "$dest/"
-    local count=$(find "$dest" -name "*.nfc" | wc -l | tr -d ' ')
+    count=$(find "$dest" -name "*.nfc" | wc -l | tr -d ' ')
     log_success "Amiibo collection deployed ($count NFC files)"
 }
 
-# Function to deploy the live app catalog (RM builds, category-organized)
 deploy_app_catalog() {
     log_step "Deploying app catalog to SD card..."
     
@@ -257,41 +248,38 @@ deploy_app_catalog() {
         return 0
     fi
     
-    local RSYNC_EXCLUDES=( $(all_rsync_excludes) )
-    local count=$(find "$APP_CATALOG_SRC" -name "*.fap" | wc -l | tr -d ' ')
+    local RSYNC_EXCLUDES count
+    read -r -a RSYNC_EXCLUDES <<< "$(all_rsync_excludes)"
+    count=$(find "$APP_CATALOG_SRC" -name "*.fap" | wc -l | tr -d ' ')
     log_info "Syncing $count FAPs → apps/ (RM/UL-compatible builds)"
-    # --delete refreshes stale FAPs; playground/ (script stash) is preserved
+    # --delete refreshes stale FAPs; playground/ is preserved
     rsync -qa --delete --exclude=playground \
-        ${RSYNC_EXCLUDES[@]} \
+        "${RSYNC_EXCLUDES[@]}" \
         "$APP_CATALOG_SRC/" "$SD_MOUNT/apps/"
     log_success "App catalog synchronized to SD card"
 }
 
-# Function to estimate content size before cleaning SD card
 estimate_content_size() {
     log_step "Checking if built content will fit on SD card..."
     
-    # Calculate size of the built working directory (this is what we'll actually deploy)
-    local working_size_kb=$(du -sk "$WORKING_DIR" | cut -f1)
-    local working_size_mb=$((working_size_kb / 1024))
-    
-    # Get total SD card capacity (not just free space)
-    local total_kb=$(df -k "$SD_MOUNT" | awk 'NR==2{print $2}')
-    local total_mb=$((total_kb / 1024))
-    
-    # Add 20% buffer for safety (more conservative estimate)
-    local needed_kb=$((working_size_kb * 120 / 100))
-    local needed_mb=$((needed_kb / 1024))
+    local working_size_kb working_size_mb total_kb total_mb needed_kb needed_mb
+    working_size_kb=$(du -sk "$WORKING_DIR" | cut -f1)
+    working_size_mb=$((working_size_kb / 1024))
+    total_kb=$(df -k "$SD_MOUNT" | awk 'NR==2{print $2}')
+    total_mb=$((total_kb / 1024))
+    # 20% buffer
+    needed_kb=$((working_size_kb * 120 / 100))
+    needed_mb=$((needed_kb / 1024))
     
     log_info "Built content size: ${working_size_mb}MB"
     log_info "Total SD card capacity: ${total_mb}MB"
     log_info "Required (with 20% buffer): ${needed_mb}MB"
     
-    if [ $needed_kb -gt $total_kb ]; then
+    if [ "$needed_kb" -gt "$total_kb" ]; then
         log_error "SD card is too small for this content!"
         log_error "Need: ${needed_mb}MB, SD card total capacity: ${total_mb}MB"
-        log_error "Aborting before cleaning SD card to preserve existing content"
-        log_info "You need a larger SD card (recommend 32GB+)"
+        log_error "Aborting before deployment to preserve existing content"
+        log_info "You need a larger SD card"
         return 1
     fi
     
@@ -301,27 +289,23 @@ estimate_content_size() {
     return 0
 }
 
-# Function to check if content will fit on SD card after cleanup
 check_sd_space() {
     log_step "Final space verification before deployment..."
     
-    # Calculate size of working directory
-    local working_size_kb=$(du -sk "$WORKING_DIR" | cut -f1)
-    local working_size_mb=$((working_size_kb / 1024))
-    
-    # Get available space on SD card (in KB) - should be more now after cleanup
-    local available_kb=$(df -k "$SD_MOUNT" | awk 'NR==2{print $4}')
-    local available_mb=$((available_kb / 1024))
-    
-    # Add 10% buffer for safety
-    local needed_kb=$((working_size_kb * 110 / 100))
-    local needed_mb=$((needed_kb / 1024))
+    local working_size_kb working_size_mb available_kb available_mb needed_kb needed_mb
+    working_size_kb=$(du -sk "$WORKING_DIR" | cut -f1)
+    working_size_mb=$((working_size_kb / 1024))
+    available_kb=$(df -k "$SD_MOUNT" | awk 'NR==2{print $4}')
+    available_mb=$((available_kb / 1024))
+    # 10% buffer
+    needed_kb=$((working_size_kb * 110 / 100))
+    needed_mb=$((needed_kb / 1024))
     
     log_info "Content size: ${working_size_mb}MB"
     log_info "Available space (after cleanup): ${available_mb}MB"
     log_info "Required (with 10% buffer): ${needed_mb}MB"
     
-    if [ $needed_kb -gt $available_kb ]; then
+    if [ "$needed_kb" -gt "$available_kb" ]; then
         log_error "Built content won't fit in available space!"
         log_error "Need: ${needed_mb}MB, Available: ${available_mb}MB"
         log_info "This could mean other content on SD card is using more space than expected"
@@ -333,7 +317,6 @@ check_sd_space() {
     return 0
 }
 
-# Function to deploy everything to SD card
 deploy_to_sd_card() {
     log_step "Deploying all content to SD card..."
     
@@ -343,8 +326,8 @@ deploy_to_sd_card() {
         return 1
     fi
 
-    # Build rsync exclude args (combine ignore + metadata)
-    local RSYNC_EXCLUDES=( $(all_rsync_excludes) )
+    local RSYNC_EXCLUDES
+    read -r -a RSYNC_EXCLUDES <<< "$(all_rsync_excludes)"
 
     # Deploy each mapped SD category that has built content
     local sd_dir src dst
@@ -356,24 +339,23 @@ deploy_to_sd_card() {
         fi
         dst="$SD_MOUNT/$sd_dir/playground/"
         log_info "Syncing $sd_dir/playground/ to SD card..."
-        # rsync -avh --delete --progress ${RSYNC_EXCLUDES[@]} "$src" "$dst" # Uncomment for verbose output
-        rsync -qa --inplace --delete --stats ${RSYNC_EXCLUDES[@]} "$src" "$dst"
+        # rsync -avh --delete --progress "${RSYNC_EXCLUDES[@]}" "$src" "$dst" # Uncomment for verbose output
+        rsync -qa --inplace --delete --stats "${RSYNC_EXCLUDES[@]}" "$src" "$dst"
     done
 
     log_success "All playground content synchronized to SD card efficiently"
 }
 
-# Function to create deployment summary
 create_summary() {
     log_step "Creating deployment summary..."
     
-    # Count files by type
-    local badusb_count=$(find "$SD_MOUNT/badusb" -name "*.txt" 2>/dev/null | wc -l | tr -d ' ')
-    local subghz_count=$(find "$SD_MOUNT/subghz" -name "*.sub" 2>/dev/null | wc -l | tr -d ' ')
-    local nfc_count=$(find "$SD_MOUNT/nfc" -name "*.nfc" 2>/dev/null | wc -l | tr -d ' ')
-    local ir_count=$(find "$SD_MOUNT/infrared" -name "*.ir" 2>/dev/null | wc -l | tr -d ' ')
-    local app_count=$(find "$SD_MOUNT/apps" -name "*.fap" 2>/dev/null | wc -l | tr -d ' ')
-    local music_count=$(find "$SD_MOUNT/music_player" -name "*.txt" 2>/dev/null | wc -l | tr -d ' ')
+    local badusb_count subghz_count nfc_count ir_count app_count music_count
+    badusb_count=$(find "$SD_MOUNT/badusb" -name "*.txt" 2>/dev/null | wc -l | tr -d ' ')
+    subghz_count=$(find "$SD_MOUNT/subghz" -name "*.sub" 2>/dev/null | wc -l | tr -d ' ')
+    nfc_count=$(find "$SD_MOUNT/nfc" -name "*.nfc" 2>/dev/null | wc -l | tr -d ' ')
+    ir_count=$(find "$SD_MOUNT/infrared" -name "*.ir" 2>/dev/null | wc -l | tr -d ' ')
+    app_count=$(find "$SD_MOUNT/apps" -name "*.fap" 2>/dev/null | wc -l | tr -d ' ')
+    music_count=$(find "$SD_MOUNT/music_player" -name "*.txt" 2>/dev/null | wc -l | tr -d ' ')
     
     echo ""
     echo -e "${CYAN}📊 Deployment Summary${NC}"
@@ -392,9 +374,9 @@ create_summary() {
     echo "   • SD card:           Removed $META_CLEANED_SD files"
     echo ""
 
-    # Calculate total used space
-    local total_used=$(df -h "$SD_MOUNT" | awk 'NR==2{print $3}')
-    local total_avail=$(df -h "$SD_MOUNT" | awk 'NR==2{print $4}')
+    local total_used total_avail
+    total_used=$(df -h "$SD_MOUNT" | awk 'NR==2{print $3}')
+    total_avail=$(df -h "$SD_MOUNT" | awk 'NR==2{print $4}')
     
     echo -e "${BLUE}💾 SD Card Usage:${NC} $total_used used, $total_avail available"
     echo -e "${CYAN}📁 Content Organization:${NC}"
@@ -402,7 +384,6 @@ create_summary() {
     echo ""
 }
 
-# Function to cleanup working directory
 cleanup() {
     log_step "Cleaning up local working directory..."
     if [ -d "$WORKING_DIR" ]; then
@@ -411,7 +392,6 @@ cleanup() {
     fi
 }
 
-# Function to clean OS metadata from a target directory
 clean_metadata() {
     local target_dir="$1"
     log_step "Cleaning OS metadata files from $target_dir..."
@@ -420,13 +400,14 @@ clean_metadata() {
         local matches
         matches=$(find "$target_dir" -name "$pattern" 2>/dev/null | wc -l | tr -d ' ')
         if [ "$matches" -gt 0 ]; then
-            find "$target_dir" -name "$pattern" -exec rm -rf {} + 2>/dev/null
+            # Some macOS system dirs (Spotlight, fsevents) are protected and
+            # fail to delete; best effort is fine here
+            find "$target_dir" -name "$pattern" -exec rm -rf {} + 2>/dev/null || true
             total_removed=$((total_removed + matches))
             log_info "Removed $matches $pattern files"
         fi
     done
-    # Remove empty directories that might have been left behind
-    find "$target_dir" -type d -empty -delete 2>/dev/null
+    find "$target_dir" -type d -empty -delete 2>/dev/null || true
     LAST_CLEAN_COUNT=$total_removed
     if [ $total_removed -gt 0 ]; then
         log_success "Cleaned $total_removed metadata files from $target_dir"
@@ -438,7 +419,7 @@ clean_metadata() {
 # Main execution
 main() {
     echo -e "${PURPLE}"
-    echo "🐬 Flipper Zero SD Card Builder v2.0"
+    echo "🐬 Flipper Zero SD Card Builder v3.0"
     echo "====================================="
     echo -e "${CYAN}📦 Sources: UberGuidoZ/Flipper (Playground) + Gutierre0x80/FlipperAmiiboCollection${NC}"
     echo ""
@@ -450,9 +431,9 @@ main() {
     setup_working_directory
     copy_playground_content
     copy_amiibo_content
-    estimate_content_size || exit 1  # Check size of built content before cleaning SD
+    estimate_content_size || exit 1
 
-    # Clean OS metadata from the working build (always safe: pure OS junk patterns)
+    # Pure OS junk; always safe to remove
     clean_metadata "$WORKING_DIR"
     META_CLEANED_WORK=$LAST_CLEAN_COUNT
 
@@ -468,8 +449,6 @@ main() {
 
     echo ""
     echo -e "${GREEN}🎉 SD Card build complete!${NC}"
-    echo -e "${CYAN}💡 Your Flipper Zero is ready with the latest UberGuidoZ content${NC}"
-    echo -e "${YELLOW}📝 Note: This script automatically updates repositories before building${NC}"
     echo ""
 }
 
