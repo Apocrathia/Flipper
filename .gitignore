@@ -1,4 +1,11 @@
+# OS Crap
+.DS_Store
+._*
+
+# Build-managed (auto-cloned by build-sd.sh)
 Playground
-SD
 AmiiboCollection
+
+# Local working state
+SD
 .scratch
